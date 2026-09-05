@@ -14,7 +14,8 @@ import aiohttp
 
 # ========== КОНФИГУРАЦИЯ ==========
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Обязательно задайте в Railway!
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")  # URL вашего FastAPI
+# ВАЖНО: используем PORT от Railway, если задан, иначе 8000 (для локальной разработки)
+API_BASE_URL = os.getenv("API_BASE_URL", f"http://localhost:{os.getenv('PORT', '8000')}")
 
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не задан в переменных окружения")
@@ -206,7 +207,7 @@ async def cmd_budget(message: Message):
             return
         except ValueError:
             await message.answer("Формат: /budget 10000 (сумма в рублях)")
-            return  # добавлено, чтобы не показывать текущий бюджет при ошибке
+            return
 
     # Если вызова не было — просто показываем текущий бюджет
     result, status = await call_api("GET", "/api/budget", token=token)
