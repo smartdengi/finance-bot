@@ -10,9 +10,10 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, func, extract, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
 
 from bot import bot, dp
 from aiogram.types import Update
@@ -22,10 +23,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 дней
 
-# === База данных (Railway предоставит DATABASE_URL) ===
+# === База данных ===
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///finance.db")
-
-# Для SQLite нужно особым образом передавать параметры
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -45,7 +44,7 @@ class Transaction(Base):
     __tablename__ = "transactions"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, index=True)
-    amount = Column(Float)  # положительное — расход, отрицательное — доход
+    amount = Column(Float)  # + расход, – доход
     category = Column(String, default="Разное")
     comment = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -58,10 +57,9 @@ class Budget(Base):
     month = Column(Integer, nullable=False)
     year = Column(Integer, nullable=False)
 
-# Создаём таблицы (если их ещё нет)
 Base.metadata.create_all(bind=engine)
 
-# === Схемы Pydantic ===
+# === Pydantic схемы ===
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -128,7 +126,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
-# === Lifespan: установка вебхука при старте ===
+# === Вспомогательная функция для получения month expression (SQLite/Postgres) ===
+def month_expr(column):
+    if DATABASE_URL.startswith("sqlite"):
+        return func.strftime('%m', column)
+    return func.extract('month', column)
+
+# === Lifespan: установка вебхука ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
@@ -157,8 +161,12 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     hashed = get_password_hash(user.password)
     db_user = User(email=user.email, hashed_password=hashed)
     db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
+    try:
+        db.commit()
+        db.refresh(db_user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
     return db_user
 
 @app.post("/auth/login")
@@ -178,7 +186,11 @@ def get_profile(current_user: User = Depends(get_current_user)):
     }
 
 @app.post("/api/premium/activate")
-def activate_premium(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def activate_premium(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Временно: активирует Premium на 30 дней без оплаты."""
     current_user.is_premium = True
     current_user.premium_until = datetime.utcnow() + timedelta(days=30)
     db.commit()
@@ -238,34 +250,64 @@ def get_stats(
     return {"expenses": expenses, "income": income}
 
 @app.get("/api/budget")
-def get_budget(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_budget(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     now = datetime.now()
     month, year = now.month, now.year
-    budget = db.query(Budget).filter_by(user_id=current_user.id, month=month, year=year).first()
-    spent = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+
+    budget = db.query(Budget).filter_by(
+        user_id=current_user.id,
+        month=month,
+        year=year
+    ).first()
+
+    # Сумма расходов за текущий месяц
+    spent = db.query(
+        func.coalesce(func.sum(Transaction.amount), 0)
+    ).filter(
         Transaction.user_id == current_user.id,
         Transaction.amount > 0,
-        func.extract('month', Transaction.created_at) == month,
-        func.extract('year', Transaction.created_at) == year
+        month_expr(Transaction.created_at) == str(month),
+        func.strftime('%Y', Transaction.created_at) == str(year)
     ).scalar()
+
     if not budget:
         return {"budget": None, "spent": spent, "remaining": None}
+
     remaining = budget.amount - spent
     return {"budget": budget.amount, "spent": spent, "remaining": remaining}
 
 @app.post("/api/budget")
-def set_budget(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def set_budget(
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     amount = payload.get("amount")
     if amount is None or amount <= 0:
         raise HTTPException(status_code=400, detail="amount must be positive")
     now = datetime.now()
     month, year = now.month, now.year
-    budget = db.query(Budget).filter_by(user_id=current_user.id, month=month, year=year).first()
+
+    budget = db.query(Budget).filter_by(
+        user_id=current_user.id,
+        month=month,
+        year=year
+    ).first()
+
     if budget:
         budget.amount = amount
     else:
-        budget = Budget(user_id=current_user.id, amount=amount, month=month, year=year)
+        budget = Budget(
+            user_id=current_user.id,
+            amount=amount,
+            month=month,
+            year=year
+        )
         db.add(budget)
+
     db.commit()
     return {"message": "Бюджет установлен"}
 
@@ -273,7 +315,12 @@ def set_budget(payload: dict, current_user: User = Depends(get_current_user), db
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    print("🔥 Получен апдейт:", data)
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
+
+# === Запуск (используется при локальном запуске) ===
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
