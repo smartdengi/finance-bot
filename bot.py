@@ -13,9 +13,10 @@ from aiogram.types import Message
 import aiohttp
 
 # ========== КОНФИГУРАЦИЯ ==========
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Обязательно задайте в Railway!
-# ВАЖНО: используем PORT от Railway, если задан, иначе 8000 (для локальной разработки)
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", f"http://localhost:{os.getenv('PORT', '8000')}")
+# Секретный код для ручной активации Premium (тестовая команда /activate)
+ACTIVATE_CODE = os.getenv("ACTIVATE_CODE", "SUPER_SECRET_2024")
 
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не задан в переменных окружения")
@@ -25,29 +26,19 @@ dp = Dispatcher()
 
 # Хранилище JWT-токенов по chat_id
 user_tokens: Dict[int, str] = {}
-
-# Простое хранилище состояний для сценариев регистрации/логина/добавления
 state_data: Dict[int, dict] = {}
-
 
 def get_state(chat_id: int) -> Optional[dict]:
     return state_data.get(chat_id)
 
-
 def set_state(chat_id: int, state: str, data: dict = None):
     state_data[chat_id] = {"state": state, "data": data or {}}
-
 
 def clear_state(chat_id: int):
     state_data.pop(chat_id, None)
 
-
 # ========== ФУНКЦИЯ ВЫЗОВА API ==========
 async def call_api(method: str, path: str, payload: dict = None, token: str = None, form: bool = False):
-    """
-    Универсальный вызов FastAPI.
-    Возвращает (json_response, status_code).
-    """
     url = f"{API_BASE_URL}{path}"
     headers = {}
     if token:
@@ -58,27 +49,21 @@ async def call_api(method: str, path: str, payload: dict = None, token: str = No
             if method.upper() == "GET":
                 async with session.get(url, headers=headers) as resp:
                     return await resp.json(), resp.status
-
             elif method.upper() == "POST":
                 if form:
-                    # Для OAuth2 (логин) нужен формат x-www-form-urlencoded
                     headers["Content-Type"] = "application/x-www-form-urlencoded"
                     async with session.post(url, data=payload, headers=headers) as resp:
                         return await resp.json(), resp.status
                 else:
                     async with session.post(url, json=payload or {}, headers=headers) as resp:
                         return await resp.json(), resp.status
-
             elif method.upper() == "DELETE":
                 async with session.delete(url, headers=headers) as resp:
                     return await resp.json(), resp.status
             else:
                 raise ValueError(f"Unsupported method: {method}")
-
         except Exception as e:
-            # Возвращаем читаемую ошибку
             return {"detail": str(e)}, 500
-
 
 # ========== КОМАНДЫ ==========
 
@@ -93,9 +78,9 @@ async def cmd_start(message: Message):
         "💰 /budget — бюджет на месяц\n"
         "➖ /add — добавить расход или доход\n"
         "👤 /profile — профиль и статус подписки\n"
+        "💎 /premium — Premium-подписка\n"
         "❓ /help — справка"
     )
-
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -109,10 +94,10 @@ async def cmd_help(message: Message):
         "/budget — установить бюджет на месяц\n"
         "/add — добавить транзакцию\n"
         "/profile — просмотр профиля\n"
-        "/premium — о Premium (скоро)\n"
+        "/premium — преимущества и подключение Premium\n"
+        "/activate — секретная команда для тестирования Premium\n"
         "/help — справка"
     )
-
 
 @dp.message(Command("register"))
 async def cmd_register(message: Message):
@@ -123,7 +108,6 @@ async def cmd_register(message: Message):
     set_state(chat_id, "reg_email")
     await message.answer("Введите ваш email (например, user@mail.ru):")
 
-
 @dp.message(Command("login"))
 async def cmd_login(message: Message):
     chat_id = message.chat.id
@@ -133,7 +117,6 @@ async def cmd_login(message: Message):
     set_state(chat_id, "login_email")
     await message.answer("Введите ваш email:")
 
-
 @dp.message(Command("logout"))
 async def cmd_logout(message: Message):
     chat_id = message.chat.id
@@ -142,7 +125,6 @@ async def cmd_logout(message: Message):
         await message.answer("✅ Вы вышли из аккаунта.")
     else:
         await message.answer("Вы и так не авторизованы.")
-
 
 @dp.message(Command("add"))
 async def cmd_add(message: Message):
@@ -160,7 +142,6 @@ async def cmd_add(message: Message):
         "• `расход 500 продукты` или `доход 500 фриланс`"
     )
 
-
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     chat_id = message.chat.id
@@ -168,7 +149,6 @@ async def cmd_stats(message: Message):
     if not token:
         await message.answer("Сначала войдите: /login или /register")
         return
-
     try:
         result, status = await call_api("GET", "/api/stats", token=token)
         if status == 200:
@@ -185,7 +165,6 @@ async def cmd_stats(message: Message):
     except Exception as e:
         await message.answer(f"Ошибка соединения: {e}")
 
-
 @dp.message(Command("budget"))
 async def cmd_budget(message: Message):
     chat_id = message.chat.id
@@ -194,7 +173,6 @@ async def cmd_budget(message: Message):
         await message.answer("Сначала войдите: /login или /register")
         return
 
-    # Пытаемся распарсить аргумент (если пользователь передал сумму)
     args = message.text.split(maxsplit=1)
     if len(args) == 2:
         try:
@@ -209,7 +187,6 @@ async def cmd_budget(message: Message):
             await message.answer("Формат: /budget 10000 (сумма в рублях)")
             return
 
-    # Если вызова не было — просто показываем текущий бюджет
     result, status = await call_api("GET", "/api/budget", token=token)
     if status == 200:
         data = result
@@ -230,7 +207,6 @@ async def cmd_budget(message: Message):
     else:
         await message.answer(f"Ошибка: {result.get('detail', result)}")
 
-
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     chat_id = message.chat.id
@@ -238,7 +214,6 @@ async def cmd_profile(message: Message):
     if not token:
         await message.answer("Вы не вошли в аккаунт. Используйте /login")
         return
-
     try:
         result, status = await call_api("GET", "/api/profile", token=token)
     except Exception as e:
@@ -254,7 +229,6 @@ async def cmd_profile(message: Message):
         text = f"👤 Ваш профиль:\n📧 Email: {email}\n💎 Статус: {premium_status}"
 
         if premium_until:
-            # Преобразуем ISO-дату в читаемый вид
             try:
                 date_obj = datetime.fromisoformat(premium_until.replace("Z", ""))
                 text += f"\n📅 Действует до: {date_obj.strftime('%d.%m.%Y')}"
@@ -268,8 +242,6 @@ async def cmd_profile(message: Message):
     else:
         await message.answer(f"Ошибка: {result.get('detail', result)}")
 
-
-# Временно заглушка для /premium (в следующем шаге подключим Telegram Stars)
 @dp.message(Command("premium"))
 async def cmd_premium(message: Message):
     chat_id = message.chat.id
@@ -277,14 +249,13 @@ async def cmd_premium(message: Message):
     if not token:
         await message.answer("Сначала войдите: /login или /register")
         return
-
-    # Проверяем, активна ли уже подписка
+    # Проверяем статус
     try:
         result, status = await call_api("GET", "/api/profile", token=token)
         if status == 200 and result.get("is_premium"):
             until = result.get("premium_until") or "долго"
             date_str = until[:10] if until else "?"
-            await message.answer(f"✅ У вас уже есть премиум до {date_str}. Спасибо!")
+            await message.answer(f"✅ У вас уже есть premium до {date_str}. Спасибо!")
             return
     except Exception as e:
         await message.answer(f"⚠️ Ошибка проверки: {e}")
@@ -292,16 +263,43 @@ async def cmd_premium(message: Message):
 
     await message.answer(
         "💎 Premium-подписка скоро будет доступна!\n"
-        "Она откроет все функции без ограничений и AI-помощника."
+        "Она откроет все функции без ограничений и AI-помощника.\n\n"
+        "Для тестирования используйте секретную команду /activate <код>"
     )
 
+# ========== СЕКРЕТНАЯ АКТИВАЦИЯ PREMIUM ==========
+@dp.message(Command("activate"))
+async def cmd_activate(message: Message):
+    chat_id = message.chat.id
+    args = message.text.split(maxsplit=1)
+
+    if len(args) != 2 or args[1].strip() != ACTIVATE_CODE:
+        await message.answer("❌ Неверный код активации.")
+        return
+
+    token = user_tokens.get(chat_id)
+    if not token:
+        await message.answer("Вы не вошли в аккаунт. Используйте /login")
+        return
+
+    # Проверяем, может уже есть Premium
+    result, status = await call_api("GET", "/api/profile", token=token)
+    if status == 200 and result.get("is_premium"):
+        await message.answer("✅ Premium уже активен.")
+        return
+
+    result, status = await call_api("POST", "/api/premium/activate", token=token)
+    if status == 200:
+        await message.answer("🎉 Premium активирован на 30 дней!")
+    else:
+        await message.answer(f"❌ Ошибка активации: {result.get('detail', result)}")
 
 # ========== ОБРАБОТЧИК СОСТОЯНИЙ ==========
 @dp.message()
 async def handle_states(message: Message):
     chat_id = message.chat.id
     if message.text and message.text.startswith("/"):
-        return  # команды обрабатываются выше
+        return
 
     state_data_obj = get_state(chat_id)
     if not state_data_obj:
@@ -312,7 +310,7 @@ async def handle_states(message: Message):
     text = message.text.strip()
     print(f"DEBUG: chat={chat_id}, state={state}, text={text}")
 
-    # ---- РЕГИСТРАЦИЯ ----
+    # РЕГИСТРАЦИЯ
     if state == "reg_email":
         if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
             await message.answer("Введите корректный email, например test@mail.ru:")
@@ -345,10 +343,9 @@ async def handle_states(message: Message):
                 await message.answer(f"Ошибка регистрации: {result.get('detail', result)}")
         except Exception as e:
             await message.answer(f"Ошибка соединения с сервером: {e}")
-        # Сбрасываем состояние при любом исходе
         clear_state(chat_id)
 
-    # ---- ЛОГИН ----
+    # ЛОГИН
     elif state == "login_email":
         set_state(chat_id, "login_pass", {"username": text})
         await message.answer("Введите пароль:")
@@ -372,7 +369,7 @@ async def handle_states(message: Message):
             await message.answer(f"Ошибка соединения: {e}")
         clear_state(chat_id)
 
-    # ---- ДОБАВЛЕНИЕ ТРАНЗАКЦИИ ----
+    # ДОБАВЛЕНИЕ ТРАНЗАКЦИИ
     elif state == "add_transaction":
         token = user_tokens.get(chat_id)
         if not token:
@@ -395,14 +392,13 @@ async def handle_states(message: Message):
                 amount = -float(parts[1].replace(",", "."))
                 category = parts[2]
             else:
-                # формат: "сумма категория"
                 amount_str, category = text.split(maxsplit=1)
                 amount = float(amount_str.replace(",", "."))
         except (IndexError, ValueError):
             await message.answer("Не понял формат. Пример: `500 продукты`, `-500 фриланс`, `расход 500 продукты`")
             return
 
-        category = category.strip()[:50]  # ограничим длину
+        category = category.strip()[:50]
         payload = {"amount": amount, "category": category, "comment": None}
         try:
             result, status = await call_api("POST", "/api/transactions", payload, token=token)
@@ -415,15 +411,13 @@ async def handle_states(message: Message):
             await message.answer(f"Ошибка соединения: {e}")
         clear_state(chat_id)
 
-
-# ========== ТОЧКА ВХОДА (не используется при импорте в main.py) ==========
+# ========== ТОЧКА ВХОДА ==========
 async def main():
     logging.basicConfig(level=logging.INFO)
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
